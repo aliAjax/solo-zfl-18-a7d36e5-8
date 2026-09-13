@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>桌游规则遗忘点卡片库</title>
+    <title>桌游规则遗忘点卡片库 · 规则接力教练台</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -13,21 +13,30 @@
           <p class="eyebrow">聚会前快速复习</p>
           <h1>桌游规则遗忘点卡片库</h1>
         </div>
-        <div class="summary">
-          <div>
-            <span>收藏</span>
-            <strong id="gameCount">0</strong>
+        <div class="topbar-side">
+          <div class="summary">
+            <div>
+              <span>收藏</span>
+              <strong id="gameCount">0</strong>
+            </div>
+            <div>
+              <span>遗忘点</span>
+              <strong id="ruleCount">0</strong>
+            </div>
+            <div>
+              <span>最久未玩</span>
+              <strong id="staleGame">-</strong>
+            </div>
           </div>
-          <div>
-            <span>遗忘点</span>
-            <strong id="ruleCount">0</strong>
-          </div>
-          <div>
-            <span>最久未玩</span>
-            <strong id="staleGame">-</strong>
+          <div class="io-actions">
+            <button id="exportBtn" type="button">导出数据</button>
+            <label class="import-label" for="importFile">导入数据</label>
+            <input id="importFile" type="file" accept="application/json,.json" hidden />
           </div>
         </div>
       </header>
+
+      <div id="importReport"></div>
 
       <section class="controls">
         <label>
@@ -119,8 +128,11 @@
           <div id="detailView"></div>
         </aside>
       </section>
+
+      <section class="panel relay-panel" id="relayPanel"></section>
     </main>
 
+    <script src="relay-core.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
