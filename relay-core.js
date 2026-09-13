@@ -93,9 +93,10 @@
 
   /* ---------- 解锁与进度 ---------- */
 
-  /* 已确认、已跳过、已转补讲都视为“已了结”，不再阻塞后续关卡。 */
+  /* 已确认、已跳过才视为“已了结”。补讲区（deferred）不算了结：
+     前置关卡未确认前，后续关卡必须保持锁定。 */
   function isResolved(item) {
-    return item.status === "confirmed" || item.status === "skipped" || item.deferred;
+    return item.status === "confirmed" || item.status === "skipped";
   }
 
   /* 计算每个关卡的解锁状态与阻塞来源。 */
@@ -464,10 +465,18 @@
               ? normalized.relay.members
               : [];
           const items = validateItems(draft.items, members, `${label}「${owner}」的草稿：`, errors);
+          const draftBudget = Number(draft.budgetMinutes) > 0
+            ? Number(draft.budgetMinutes)
+            : (normalized.relay?.budgetMinutes || 20);
+          const draftActive = items.filter((item) => item.status !== "skipped" && !item.deferred);
+          const draftTotal = draftActive.reduce((sum, item) => sum + item.minutes, 0);
+          if (draftTotal > draftBudget) {
+            errors.push(`${label}「${owner}」的草稿：时间冲突：预计讲解 ${draftTotal} 分钟，超过预算 ${draftBudget} 分钟`);
+          }
           normalized.drafts[owner] = {
             items,
             members,
-            budgetMinutes: Number(draft.budgetMinutes) > 0 ? Number(draft.budgetMinutes) : (normalized.relay?.budgetMinutes || 20),
+            budgetMinutes: draftBudget,
             updatedAt: typeof draft.updatedAt === "string" ? draft.updatedAt : "",
             history: []
           };

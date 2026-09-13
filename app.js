@@ -56,6 +56,12 @@ state.games.forEach((game) => RC.normalizeGame(game));
 if (typeof state.editorName !== "string" || !state.editorName.trim()) state.editorName = "主理人";
 if (!state.selectedId) state.selectedId = state.games[0]?.id || "";
 
+/* 多标签页协作：baseline 记录本页加载/上次保存时的状态，
+   保存时与 localStorage 里的最新持久化状态做三方合并，
+   避免后保存的页面覆盖其他标签页的草稿与进度。 */
+let baseline = RC.clone(state);
+let lastWritten = localStorage.getItem(storageKey) || "";
+
 /* 页面级临时状态（不持久化）：草稿模式、重排方案预览、差异/合并/历史面板等。 */
 const ui = {
   editingDraft: false,
@@ -105,7 +111,89 @@ function loadState() {
 }
 
 function saveState() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
+  reconcileWithPersisted();
+  const serialized = JSON.stringify(state);
+  if (serialized !== lastWritten) {
+    lastWritten = serialized;
+    localStorage.setItem(storageKey, serialized);
+  }
+  baseline = RC.clone(state);
+}
+
+function readPersistedState() {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/* 三方合并（本页内存 / 持久化 / 本页基准）：
+   - 其他标签页新增的桌游并进来；本页删除的桌游不复活；
+   - 草稿按所有者求并集，同名冲突取 updatedAt 较新者；
+   - 接力进度按关卡合并：本页没动过的关卡采用其他页的进度。 */
+function reconcileWithPersisted() {
+  const persisted = readPersistedState();
+  if (!persisted || !Array.isArray(persisted.games)) return;
+  const baselineById = new Map((baseline.games || []).map((game) => [game.id, game]));
+  const memoryIds = new Set(state.games.map((game) => game.id));
+  persisted.games.forEach((persistedGame) => {
+    if (!memoryIds.has(persistedGame.id) && !baselineById.has(persistedGame.id)) {
+      const cloned = RC.clone(persistedGame);
+      RC.normalizeGame(cloned);
+      state.games.push(cloned);
+    }
+  });
+  const persistedById = new Map(persisted.games.map((game) => [game.id, game]));
+  state.games.forEach((game) => {
+    const persistedGame = persistedById.get(game.id);
+    if (!persistedGame) return;
+    const baselineGame = baselineById.get(game.id);
+    game.drafts = mergeDrafts(game.drafts, persistedGame.drafts, baselineGame && baselineGame.drafts);
+    if (game.relay && persistedGame.relay) {
+      mergeRelayProgress(game.relay, persistedGame.relay, baselineGame && baselineGame.relay);
+    }
+  });
+}
+
+function mergeDrafts(memoryDrafts, persistedDrafts, baselineDrafts) {
+  const merged = { ...(memoryDrafts || {}) };
+  Object.entries(persistedDrafts || {}).forEach(([owner, persistedDraft]) => {
+    const memoryDraft = merged[owner];
+    const baselineDraft = baselineDrafts ? baselineDrafts[owner] : undefined;
+    if (!memoryDraft) {
+      /* 本页没动过且不是本页删的 → 其他页新增的草稿，保留 */
+      if (!baselineDraft) merged[owner] = persistedDraft;
+      return;
+    }
+    if (!baselineDraft) {
+      /* 两边都新建了同名草稿：较新者胜 */
+      merged[owner] = String(persistedDraft.updatedAt || "") > String(memoryDraft.updatedAt || "")
+        ? persistedDraft
+        : memoryDraft;
+      return;
+    }
+    const memoryChanged = JSON.stringify(memoryDraft) !== JSON.stringify(baselineDraft);
+    const persistedChanged = JSON.stringify(persistedDraft) !== JSON.stringify(baselineDraft);
+    if (!memoryChanged && persistedChanged) merged[owner] = persistedDraft;
+  });
+  return merged;
+}
+
+function mergeRelayProgress(memoryRelay, persistedRelay, baselineRelay) {
+  if (!baselineRelay || !Array.isArray(baselineRelay.items)) return;
+  const baselineById = new Map(baselineRelay.items.map((item) => [item.id, item]));
+  const persistedById = new Map((persistedRelay.items || []).map((item) => [item.id, item]));
+  (memoryRelay.items || []).forEach((item) => {
+    const baselineItem = baselineById.get(item.id);
+    const persistedItem = persistedById.get(item.id);
+    if (!baselineItem || !persistedItem) return;
+    if (item.status === baselineItem.status && persistedItem.status !== baselineItem.status) {
+      item.status = persistedItem.status;
+      item.skipReason = persistedItem.skipReason || "";
+    }
+  });
 }
 
 function daysSince(dateString) {
@@ -518,24 +606,29 @@ function renderSkipForm(item) {
 function renderDeferredZone(game, plan) {
   const deferred = plan.items.filter((item) => item.deferred && item.status === "pending");
   if (!deferred.length) return "";
+  const unlock = RC.analyze(plan).unlock;
   return `
     <div class="deferred-zone" id="deferredZone">
       <h3>补讲 / 暂缓区（不占主流程预算）</h3>
       <ul>
         ${deferred
-          .map(
-            (item) => `
+          .map((item) => {
+            const info = unlock.get(item.id);
+            const blocked = !info.unlocked;
+            return `
               <li data-item-id="${item.id}">
                 <div>
                   <strong>${escapeHtml(item.title)}</strong>
                   <span class="relay-item-meta">👤 ${escapeHtml(item.teacher)} · ⏱ ${item.minutes} 分钟</span>
+                  ${blocked ? `<div class="blockers">需先完成：${escapeHtml(info.blockers.join("、"))}</div>` : ""}
                 </div>
                 <div class="relay-item-actions">
-                  ${ui.editingDraft ? "" : `<button type="button" class="primary" data-action="confirm" data-item-id="${item.id}">确认讲解</button>`}
+                  ${ui.editingDraft ? "" : `<button type="button" class="primary" data-action="confirm" data-item-id="${item.id}" ${blocked ? "disabled" : ""}>确认讲解</button>`}
                   <button type="button" data-action="undefer" data-item-id="${item.id}">移回主流程</button>
                 </div>
-              </li>`
-          )
+              </li>
+            `;
+          })
           .join("")}
       </ul>
     </div>
@@ -805,7 +898,7 @@ function handleRelayClick(event) {
 
     if (action === "confirm" && item) {
       const info = RC.analyze(relay).unlock.get(item.id);
-      if (!item.deferred && !info.unlocked) {
+      if (!info.unlocked) {
         ui.notice = `「${item.title}」还未解锁，需先完成：${info.blockers.join("、")}`;
       } else {
         pushUndo(relay, `确认「${item.title}」`);
@@ -1312,6 +1405,21 @@ els.relayPanel.addEventListener("change", (event) => {
       renderAll();
     }
   }
+});
+
+/* 其他标签页写入时同步本页状态（草稿、进度等即时可见）。 */
+window.addEventListener("storage", (event) => {
+  if (event.key !== storageKey || !event.newValue) return;
+  if (event.newValue === lastWritten) return;
+  state = loadState();
+  state.games.forEach((game) => RC.normalizeGame(game));
+  if (typeof state.editorName !== "string" || !state.editorName.trim()) state.editorName = "主理人";
+  if (!state.games.some((game) => game.id === state.selectedId)) {
+    state.selectedId = state.games[0]?.id || "";
+  }
+  baseline = RC.clone(state);
+  lastWritten = event.newValue;
+  renderAll();
 });
 
 setDefaultDate();
